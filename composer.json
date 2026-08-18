@@ -1,0 +1,20 @@
+{
+	"name": "fusio/contentcopy",
+	"description": "Push a post, page or custom post type — with its media, terms and custom fields — from one WordPress site to another.",
+	"type": "wordpress-plugin",
+	"license": "GPL-2.0-or-later",
+	"require": {
+		"php": ">=8.4",
+		"monolog/monolog": "^3.8",
+		"psr/log": "^3.0"
+	},
+	"autoload": {
+		"psr-4": {
+			"ContentCopy\\": "src/"
+		}
+	},
+	"config": {
+		"optimize-autoloader": true,
+		"sort-packages": true
+	}
+}
