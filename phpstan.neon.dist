@@ -11,3 +11,4 @@ parameters:
 	scanFiles:
 		- vendor/php-stubs/wordpress-stubs/wordpress-stubs.php
 		- dev-stubs/acf.php
+		- dev-stubs/gravityforms.php

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace ContentCopy\Rest;
 
+use ContentCopy\ChunkStore;
+use ContentCopy\GravityFormsBridge;
 use ContentCopy\Logging\MemoryHandler;
 use ContentCopy\Plugin;
 use ContentCopy\Uuid;
@@ -24,17 +26,24 @@ defined( 'ABSPATH' ) || exit;
  *   plausibly push (`mayWriteContent()`: edit, upload or any post type's
  *   `create_posts`). Lookup reveals only IDs, hashes and timestamps, never
  *   content, and only for items the user could edit anyway.
- * - `remote/media` — requires `upload_files`, like the media library itself,
- *   and `edit_post` on the specific attachment before replacing its bytes.
+ * - `remote/media` and `remote/media/chunk` — require `upload_files`, like
+ *   the media library itself, and `edit_post` on the specific attachment
+ *   before replacing its bytes. A chunk session also belongs to the user who
+ *   opened it, so one uploader cannot append to another's file.
+ * - `remote/forms` — same coarse gate as `remote/receive`; the forms
+ *   themselves are matched by UUID, so there is no per-item capability to
+ *   narrow to beyond being allowed to write content at all.
  * - `remote/receive` — same coarse gate; the `Importer` then checks the
  *   *post-type* capability (`create_posts`) and, for updates, `edit_post`
  *   on the existing copy. A user who can only write pages cannot push posts.
  *
- * Four routes:
+ * Six routes:
  *
  * - `GET /remote/info` — diagnostics the source's connection test displays.
  * - `GET /remote/lookup` — "do you have this UUID?" for dedup and conflicts.
  * - `POST /remote/media` — raw file bytes plus a metadata header.
+ * - `POST /remote/media/chunk` — one piece of a file too big for one request.
+ * - `POST /remote/forms` — exported Gravity Forms definitions.
  * - `POST /remote/receive` — the remapped post payload.
  */
 final class DestinationController {
@@ -61,7 +70,7 @@ final class DestinationController {
 	}
 
 	/**
-	 * Register the four remote routes with their capability gates.
+	 * Register the remote routes with their capability gates.
 	 *
 	 * @return void
 	 */
@@ -106,6 +115,31 @@ final class DestinationController {
 				'methods'             => 'POST',
 				'callback'            => $this->media( ... ),
 				'permission_callback' => static fn (): bool => current_user_can( 'upload_files' ),
+			]
+		);
+
+		register_rest_route(
+			self::NAMESPACE,
+			'/remote/media/chunk',
+			[
+				'methods'             => 'POST',
+				'callback'            => $this->mediaChunk( ... ),
+				// Same gate as the whole-file route: spooling pieces of a
+				// file is the first half of uploading one.
+				'permission_callback' => static fn (): bool => current_user_can( 'upload_files' ),
+			]
+		);
+
+		register_rest_route(
+			self::NAMESPACE,
+			'/remote/forms',
+			[
+				'methods'             => 'POST',
+				'callback'            => $this->forms( ... ),
+				// Coarse gate only — forms have no per-item capability model
+				// to check against, so anyone who may write content at all
+				// may sync the forms their content embeds.
+				'permission_callback' => self::mayWriteContent( ... ),
 			]
 		);
 
@@ -180,6 +214,17 @@ final class DestinationController {
 				'max_upload'   => [
 					'bytes' => $max,
 					'human' => size_format( $max ),
+				],
+				// What the source needs to know to push a file larger than
+				// one request allows: that this site can take it in pieces,
+				// how big a piece should be, and where the ceiling is.
+				'chunking'     => [
+					'supported'  => true,
+					'chunk_size' => ChunkStore::chunkSize( $max ),
+					'max_total'  => ChunkStore::maxTotalSize(),
+				],
+				'gravity_forms' => [
+					'active' => GravityFormsBridge::active(),
 				],
 				'post_types'   => array_values( get_post_types( [ 'show_ui' => true ] ) ),
 			],
@@ -303,6 +348,126 @@ final class DestinationController {
 		$response['warnings'] = $collector->problems();
 
 		return new WP_REST_Response( $response, 200 );
+	}
+
+	/**
+	 * Spool one piece of a file, and import it once the last piece lands.
+	 *
+	 * The body is the piece itself; the `X-ContentCopy-File` header says
+	 * which upload it belongs to and at what offset. The first piece of a
+	 * file carries the full metadata envelope and no session, which is how
+	 * the store knows to open one.
+	 *
+	 * Every reply reports how much of the file the destination now holds, so
+	 * a source that lost a response can resume from the right place instead
+	 * of starting the file again.
+	 *
+	 * @param WP_REST_Request $request Incoming request (raw piece + metadata header).
+	 *
+	 * @return WP_REST_Response|WP_Error Progress, or the finished descriptor on the last piece.
+	 */
+	public function mediaChunk( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+		$envelope = self::fileEnvelope( $request );
+
+		if ( $envelope instanceof WP_Error ) {
+			return $envelope;
+		}
+
+		$bytes = $request->get_body();
+
+		if ( '' === $bytes ) {
+			return new WP_Error( 'contentcopy_empty_file', __( 'A piece of the file arrived empty.', 'contentcopy' ), [ 'status' => 400 ] );
+		}
+
+		$collector = new MemoryHandler();
+		$store     = $this->plugin->chunkStore( $collector );
+		$userId    = get_current_user_id();
+		$session   = is_string( $envelope['session'] ?? null ) ? $envelope['session'] : '';
+
+		if ( '' === $session ) {
+			$opened = $store->open( $envelope, isset( $envelope['total'] ) ? (int) $envelope['total'] : 0, $userId );
+
+			if ( $opened instanceof WP_Error ) {
+				return $opened;
+			}
+
+			$session = $opened;
+		}
+
+		$progress = $store->append(
+			$session,
+			isset( $envelope['offset'] ) ? (int) $envelope['offset'] : 0,
+			$bytes,
+			is_string( $envelope['chunk_sha256'] ?? null ) ? $envelope['chunk_sha256'] : '',
+			$userId
+		);
+
+		if ( $progress instanceof WP_Error ) {
+			return $progress;
+		}
+
+		$response = [ 'session' => $session ] + $progress;
+
+		if ( ! $progress['complete'] ) {
+			return new WP_REST_Response( $response, 200 );
+		}
+
+		// The file is whole. Verify it against the source's checksum, then
+		// hand it to the same importer a single-request upload goes through.
+		$assembled = $store->assemble( $session, $userId );
+
+		if ( $assembled instanceof WP_Error ) {
+			return $assembled;
+		}
+
+		$media = $this->plugin->mediaImporter( $collector )->importAssembled( $assembled['path'], $assembled['envelope'] );
+
+		$store->discard( $session );
+
+		if ( $media instanceof WP_Error ) {
+			return $media;
+		}
+
+		return new WP_REST_Response(
+			$media->toArray() + $response + [ 'warnings' => $collector->problems() ],
+			200
+		);
+	}
+
+	/**
+	 * Import a batch of exported Gravity Forms definitions.
+	 *
+	 * Expects `['forms' => [...]]` as produced by `GravityFormsBridge::export()`.
+	 * The response is the source-to-destination ID map plus warnings — notably
+	 * the feed warning, which the source merges into the push report so the
+	 * editor sees that feed settings still name the source site's accounts.
+	 *
+	 * @param WP_REST_Request $request Incoming request (JSON forms batch).
+	 *
+	 * @return WP_REST_Response|WP_Error ID map and warnings, or why the batch was refused.
+	 */
+	public function forms( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+		$payload = $request->get_json_params();
+
+		if ( ! is_array( $payload ) ) {
+			return new WP_Error( 'contentcopy_bad_payload', __( 'A JSON object was expected.', 'contentcopy' ), [ 'status' => 400 ] );
+		}
+
+		$collector = new MemoryHandler();
+		$result    = $this->plugin->formImporter( $collector )->import( $payload['forms'] ?? null );
+
+		if ( $result instanceof WP_Error ) {
+			return $result;
+		}
+
+		$result['warnings'] = array_values(
+			array_unique(
+				[ ...( $result['warnings'] ?? [] ), ...$collector->problems() ]
+			)
+		);
+		$result['log']      = $collector->records();
+
+		return new WP_REST_Response( $result, 200 );
 	}
 
 	/**

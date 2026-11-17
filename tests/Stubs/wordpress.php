@@ -19,6 +19,16 @@ declare(strict_types=1);
  */
 
 // ---------------------------------------------------------------------------
+// Core constants the plugin reads for sizes and durations.
+// ---------------------------------------------------------------------------
+
+defined( 'KB_IN_BYTES' ) || define( 'KB_IN_BYTES', 1024 );
+defined( 'MB_IN_BYTES' ) || define( 'MB_IN_BYTES', 1024 * KB_IN_BYTES );
+defined( 'GB_IN_BYTES' ) || define( 'GB_IN_BYTES', 1024 * MB_IN_BYTES );
+defined( 'MINUTE_IN_SECONDS' ) || define( 'MINUTE_IN_SECONDS', 60 );
+defined( 'HOUR_IN_SECONDS' ) || define( 'HOUR_IN_SECONDS', 60 * MINUTE_IN_SECONDS );
+
+// ---------------------------------------------------------------------------
 // Minimal class stand-ins.
 // ---------------------------------------------------------------------------
 
@@ -158,6 +168,7 @@ $GLOBALS['contentcopy_test_meta']         = [];
 $GLOBALS['contentcopy_test_uuid_counter'] = 0;
 $GLOBALS['contentcopy_test_post_types']   = [];
 $GLOBALS['contentcopy_test_upload_urls']  = [];
+$GLOBALS['contentcopy_test_options']      = [];
 
 if ( ! function_exists( 'contentcopy_test_reset' ) ) {
 	/**
@@ -170,6 +181,7 @@ if ( ! function_exists( 'contentcopy_test_reset' ) ) {
 		$GLOBALS['contentcopy_test_uuid_counter'] = 0;
 		$GLOBALS['contentcopy_test_post_types']   = [];
 		$GLOBALS['contentcopy_test_upload_urls']  = [];
+		$GLOBALS['contentcopy_test_options']      = [];
 	}
 }
 
@@ -229,6 +241,93 @@ if ( ! function_exists( '__' ) ) {
 	/** @param string $text @return string */
 	function __( $text ) {
 		return (string) $text;
+	}
+}
+
+if ( ! function_exists( 'apply_filters' ) ) {
+	/**
+	 * Hookless filters: the default value always wins.
+	 *
+	 * @param string $hook  Filter name, ignored.
+	 * @param mixed  $value Default value.
+	 * @param mixed  ...$args Extra arguments, ignored.
+	 * @return mixed The value, unfiltered.
+	 */
+	function apply_filters( $hook, $value, ...$args ) {
+		return $value;
+	}
+}
+
+if ( ! function_exists( 'get_option' ) ) {
+	/**
+	 * @param string $name    Option name.
+	 * @param mixed  $default Default when the option was never stored.
+	 * @return mixed
+	 */
+	function get_option( $name, $default = false ) {
+		return $GLOBALS['contentcopy_test_options'][ (string) $name ] ?? $default;
+	}
+}
+
+if ( ! function_exists( 'update_option' ) ) {
+	/**
+	 * @param string $name  Option name.
+	 * @param mixed  $value Value to store.
+	 * @return bool
+	 */
+	function update_option( $name, $value ) {
+		$GLOBALS['contentcopy_test_options'][ (string) $name ] = $value;
+
+		return true;
+	}
+}
+
+if ( ! function_exists( 'wp_json_encode' ) ) {
+	/** @param mixed $value @return string|false */
+	function wp_json_encode( $value ) {
+		return json_encode( $value );
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem: real operations in the system temp directory, so the chunk
+// spool can be exercised end to end without a WordPress install.
+// ---------------------------------------------------------------------------
+
+if ( ! function_exists( 'wp_mkdir_p' ) ) {
+	/** @param string $directory @return bool */
+	function wp_mkdir_p( $directory ) {
+		$directory = (string) $directory;
+
+		return is_dir( $directory ) || mkdir( $directory, 0777, true );
+	}
+}
+
+if ( ! function_exists( 'wp_delete_file' ) ) {
+	/** @param string $path @return void */
+	function wp_delete_file( $path ) {
+		if ( file_exists( (string) $path ) ) {
+			unlink( (string) $path );
+		}
+	}
+}
+
+if ( ! function_exists( 'wp_generate_password' ) ) {
+	/**
+	 * @param int  $length        Characters to return.
+	 * @param bool $specialChars  Ignored; the plugin never asks for them.
+	 * @param bool $extraSpecial  Ignored.
+	 * @return string Alphanumeric string of the requested length.
+	 */
+	function wp_generate_password( $length = 12, $specialChars = true, $extraSpecial = false ) {
+		$alphabet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+		$password = '';
+
+		for ( $i = 0; $i < (int) $length; $i++ ) {
+			$password .= $alphabet[ random_int( 0, strlen( $alphabet ) - 1 ) ];
+		}
+
+		return $password;
 	}
 }
 

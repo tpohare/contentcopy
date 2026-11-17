@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace ContentCopy\Logging;
 
+use ContentCopy\ProtectedDirectory;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -12,6 +14,7 @@ defined( 'ABSPATH' ) || exit;
  * publicly readable. Three defences are applied, because no single one covers
  * every host: an .htaccess deny (Apache), an index.php (directory listings),
  * and a per-site secret in the filename (nginx, which ignores .htaccess).
+ * The first two are `ProtectedDirectory`'s job; the third is this class's.
  */
 final class LogDirectory {
 
@@ -75,33 +78,12 @@ final class LogDirectory {
 	/**
 	 * Create the directory and drop in the protective files.
 	 *
-	 * Runs idempotently on every resolution: `wp_mkdir_p()` on an existing
-	 * directory is a no-op, and guard files are only written when absent, so
-	 * a host that manages its own `.htaccess` is never fought with.
-	 *
 	 * @param string $directory Absolute directory path, with trailing slash.
 	 *
 	 * @return string|null The same directory, or null when creation failed.
 	 */
 	private static function prepare( string $directory ): ?string {
-		if ( ! wp_mkdir_p( $directory ) ) {
-			return null;
-		}
-
-		$guards = [
-			'.htaccess' => "# Added by Content Copy.\n<IfModule mod_authz_core.c>\n\tRequire all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\n\tOrder allow,deny\n\tDeny from all\n</IfModule>\n",
-			'index.php' => "<?php\n// Silence is golden.\n",
-		];
-
-		foreach ( $guards as $name => $contents ) {
-			$target = $directory . $name;
-
-			if ( ! file_exists( $target ) ) {
-				file_put_contents( $target, $contents, LOCK_EX ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
-			}
-		}
-
-		return $directory;
+		return ProtectedDirectory::ensure( $directory );
 	}
 
 	/**

@@ -125,6 +125,28 @@ final class Plugin {
 	}
 
 	/**
+	 * Build a destination-side form importer.
+	 *
+	 * @param MemoryHandler|null $collector Optional in-request record collector for the REST response.
+	 *
+	 * @return FormImporter Ready to `import( $forms )`.
+	 */
+	public function formImporter( ?MemoryHandler $collector = null ): FormImporter {
+		return new FormImporter( logger: $this->destinationLogger( $collector ) );
+	}
+
+	/**
+	 * Build the destination-side spool for files arriving in pieces.
+	 *
+	 * @param MemoryHandler|null $collector Optional in-request record collector for the REST response.
+	 *
+	 * @return ChunkStore Ready to `open()`, `append()` and `assemble()`.
+	 */
+	public function chunkStore( ?MemoryHandler $collector = null ): ChunkStore {
+		return new ChunkStore( logger: $this->destinationLogger( $collector ) );
+	}
+
+	/**
 	 * The destination channel, optionally also collecting into memory.
 	 *
 	 * @param MemoryHandler|null $collector Optional in-request record collector.

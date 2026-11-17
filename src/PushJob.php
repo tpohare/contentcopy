@@ -77,6 +77,27 @@ final class PushJob {
 	public array $postReferences = [];
 
 	/**
+	 * Source form IDs the post embeds, via shortcodes, blocks or ACF form fields.
+	 *
+	 * @var list<int>
+	 */
+	public array $formIds = [];
+
+	/**
+	 * Source form ID to destination form ID, from the `remote/forms` route.
+	 *
+	 * @var array<int, int>
+	 */
+	public array $formMap = [];
+
+	/**
+	 * Warnings raised while syncing forms, merged into the final report.
+	 *
+	 * @var list<string>
+	 */
+	public array $formWarnings = [];
+
+	/**
 	 * The destination's current record for this UUID (`remote/lookup`).
 	 *
 	 * Empty when the destination has never seen this item.

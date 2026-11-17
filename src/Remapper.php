@@ -28,6 +28,10 @@ defined( 'ABSPATH' ) || exit;
  * - **Block attribute IDs** (`"id":123`, gallery `"ids"` lists, `data-id`,
  *   classic `[gallery]` shortcodes) for the same reason.
  *
+ * Embedded Gravity Forms are rewritten too, in both the shortcode and block
+ * spellings, from the map the push built by sending the form definitions
+ * ahead of the content.
+ *
  * Anything that cannot be mapped is never silently kept as a lie: unmapped
  * gallery items are dropped with a warning, an unmapped featured image is
  * unset, and unmapped ACF references keep their original ID loudly — with a
@@ -53,11 +57,13 @@ final class Remapper {
 	/**
 	 * @param array<int, MediaDescriptor> $media Source attachment ID => where it landed on the destination.
 	 * @param array<int, int>             $posts Source post ID => destination post ID, for ACF post-reference fields.
+	 * @param array<int, int>             $forms Source form ID => destination form ID, for embedded Gravity Forms.
 	 * @param LoggerInterface|null        $logger Warning sink; silent when omitted.
 	 */
 	public function __construct(
 		private readonly array $media,
 		private readonly array $posts = [],
+		private readonly array $forms = [],
 		?LoggerInterface $logger = null,
 	) {
 		$this->logger = $logger ?? new NullLogger();
@@ -158,11 +164,70 @@ final class Remapper {
 		);
 
 		// Classic gallery shortcode.
-		return (string) preg_replace_callback(
+		$content = (string) preg_replace_callback(
 			'/(\[gallery[^\]]*ids=)(["\'])([0-9,\s]+)\2/',
 			fn ( array $m ): string => $m[1] . $m[2] . $this->remapIdList( $m[3] ) . $m[2],
 			$content
 		);
+
+		return $this->replaceFormIds( $content );
+	}
+
+	/**
+	 * Point embedded Gravity Forms shortcodes and blocks at the destination's forms.
+	 *
+	 * Both embed styles are rewritten wherever they appear — content, custom
+	 * fields, page builder payloads — because a form ID that means one thing
+	 * on the source means something else entirely here. A reference with no
+	 * counterpart keeps its ID and raises a warning: better a form the editor
+	 * is told about than a silently blank space where a contact form used
+	 * to be.
+	 *
+	 * @param string $text Text to rewrite.
+	 *
+	 * @return string With destination form IDs throughout.
+	 */
+	private function replaceFormIds( string $text ): string {
+		if ( '' === $text || ! str_contains( $text, 'gravityform' ) && ! str_contains( $text, 'formId' ) ) {
+			return $text;
+		}
+
+		// [gravityform id="5" …] and [gravityforms id=5 …], attributes in any
+		// order, quoted or not.
+		$text = (string) preg_replace_callback(
+			'/(\[gravityforms?\b[^\]]*\bid=)(["\']?)(\d+)\2/i',
+			fn ( array $m ): string => $m[1] . $m[2] . $this->mappedFormLabel( (int) $m[3] ) . $m[2],
+			$text
+		);
+
+		// <!-- wp:gravityforms/form {"formId":"5", …} -->
+		return (string) preg_replace_callback(
+			'/("formId"\s*:\s*)(["\']?)(\d+)\2/',
+			fn ( array $m ): string => $m[1] . $m[2] . $this->mappedFormLabel( (int) $m[3] ) . $m[2],
+			$text
+		);
+	}
+
+	/**
+	 * The destination form ID to write in place of a source one.
+	 *
+	 * @param int $sourceId Source form ID found in the text.
+	 *
+	 * @return string Destination form ID, or the original when it could not be mapped.
+	 */
+	private function mappedFormLabel( int $sourceId ): string {
+		$mapped = $this->mappedFormId( $sourceId );
+
+		if ( null === $mapped ) {
+			$this->logger->warning(
+				'An embedded form (form {id} on the source) has no counterpart on the destination, so the embed was left pointing at form {id}. Check that Gravity Forms is active on the destination.',
+				[ 'id' => $sourceId ]
+			);
+
+			return (string) $sourceId;
+		}
+
+		return (string) $mapped;
 	}
 
 	/**
@@ -232,6 +297,20 @@ final class Remapper {
 	 */
 	public function mappedPostId( int $sourceId ): ?int {
 		return $this->posts[ $sourceId ] ?? null;
+	}
+
+	/**
+	 * Resolve a source form ID to its destination counterpart.
+	 *
+	 * Only forms the push actually sent ahead of the content — there is no
+	 * guessing here either.
+	 *
+	 * @param int $sourceId Source Gravity Forms form ID.
+	 *
+	 * @return int|null Destination form ID, or null when unknown.
+	 */
+	public function mappedFormId( int $sourceId ): ?int {
+		return $this->forms[ $sourceId ] ?? null;
 	}
 
 	/**
@@ -328,6 +407,7 @@ final class Remapper {
 		$target = match ( $kind ) {
 			ReferenceKind::Media => $this->mappedMediaId( $id ),
 			ReferenceKind::Post  => $this->mappedPostId( $id ),
+			ReferenceKind::Form  => $this->mappedFormId( $id ),
 		};
 
 		if ( null === $target ) {
@@ -357,7 +437,7 @@ final class Remapper {
 	 */
 	private function remapStringsIn( mixed $value ): mixed {
 		return match ( true ) {
-			is_string( $value ) => $this->replaceUrls( $value ),
+			is_string( $value ) => $this->replaceFormIds( $this->replaceUrls( $value ) ),
 			is_array( $value )  => array_map( $this->remapStringsIn( ... ), $value ),
 			default             => $value,
 		};

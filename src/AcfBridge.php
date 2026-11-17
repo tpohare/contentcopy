@@ -26,6 +26,14 @@ final class AcfBridge {
 	private const POST_TYPES = [ 'post_object', 'relationship', 'page_link' ];
 
 	/**
+	 * Field types whose value is one or more Gravity Forms form IDs.
+	 *
+	 * Both spellings are accepted because the field type depends on which
+	 * add-on provides it, and sites rarely know which one they have.
+	 */
+	private const FORM_TYPES = [ 'forms', 'form', 'gravity_forms_field' ];
+
+	/**
 	 * Whether ACF's field API is available right now.
 	 *
 	 * The single gate every other method checks first: no ACF, no field
@@ -74,8 +82,9 @@ final class AcfBridge {
 	 * Image, file and gallery fields hold attachment IDs — unless configured
 	 * to return a URL, in which case their values are plain strings and URL
 	 * replacement handles them without any ID mapping. Post object,
-	 * relationship and page-link fields hold post IDs. Anything else (text,
-	 * numbers, booleans, layouts) is not a reference by definition.
+	 * relationship and page-link fields hold post IDs, and form fields hold
+	 * Gravity Forms IDs. Anything else (text, numbers, booleans, layouts) is
+	 * not a reference by definition.
 	 *
 	 * @param array<string, mixed> $field ACF field definition.
 	 *
@@ -86,6 +95,10 @@ final class AcfBridge {
 
 		if ( in_array( $type, self::POST_TYPES, true ) ) {
 			return ReferenceKind::Post;
+		}
+
+		if ( in_array( $type, self::FORM_TYPES, true ) ) {
+			return ReferenceKind::Form;
 		}
 
 		if ( ! in_array( $type, self::ATTACHMENT_TYPES, true ) ) {

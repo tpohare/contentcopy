@@ -27,4 +27,9 @@ enum ReferenceKind {
 	 * The value is a regular post ID (ACF post object, relationship or page link fields).
 	 */
 	case Post;
+
+	/**
+	 * The value is a Gravity Forms form ID (ACF form fields).
+	 */
+	case Form;
 }

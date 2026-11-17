@@ -98,7 +98,17 @@ the content, and files referenced from custom fields are uploaded first and
 their URLs rewritten to the destination. Repeats reuse the existing
 destination files (matched by identity, then by content hash). Files that no
 longer exist on the source are skipped with a warning, and anything that
-fails aborts the push before anything is written on the destination.
+fails aborts the push before anything is written on the destination. Files
+larger than one request allows travel in pieces automatically and are
+reassembled on the destination before import.
+
+What happens to forms: pages embedding Gravity Forms (shortcodes, blocks and
+ACF form fields) push the form definitions — fields, notifications,
+confirmations and add-on feeds — ahead of the content, and embeds are
+rewritten to the destination's form IDs. Entries never travel. Feed settings
+still name the source site's accounts and endpoints, so check them on the
+destination before the form is used; Gravity Forms must be active on both
+sites.
 
 ## Logging
 
@@ -128,8 +138,11 @@ post behind.
   Apache the usual fix is passing it through in `.htaccess`.
 - **"Did not recognise the Content Copy endpoint"** — the plugin is not
   active on the destination, or a security plugin/firewall is blocking REST.
-- **"Larger than the destination upload limit"** — raise the destination's
-  `upload_max_filesize`/`post_max_size`, or shrink the file.
+- **"Larger than the destination upload limit"** — files bigger than one
+  request allows are sent in pieces automatically; this error now only means
+  the file exceeds the destination's total cap (2 GB by default, filterable
+  via `contentcopy_max_chunked_size`) or the destination runs an older
+  version of this plugin — update it there.
 - **Post type / taxonomy errors** — register the post type (and taxonomies)
   on the destination first; the push names what is missing.
 - **Parent page lands at the top level** — the parent has not been pushed
