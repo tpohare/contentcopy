@@ -23,6 +23,7 @@ phpunit.xml
 /logs/
 
 # Editors.
+.phpactor.json
 .idea/
 .vscode/
 *.sublime-project

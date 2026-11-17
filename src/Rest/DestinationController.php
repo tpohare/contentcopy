@@ -21,10 +21,12 @@ defined( 'ABSPATH' ) || exit;
  * permission callback starts from "who is this?" and narrows to "may they?":
  *
  * - `remote/info` and `remote/lookup` — any authenticated user who could
- *   plausibly push (edit or upload rights). Lookup reveals only IDs, hashes
- *   and timestamps, never content.
- * - `remote/media` — requires `upload_files`, like the media library itself.
- * - `remote/receive` — requires login; the `Importer` then checks the
+ *   plausibly push (`mayWriteContent()`: edit, upload or any post type's
+ *   `create_posts`). Lookup reveals only IDs, hashes and timestamps, never
+ *   content, and only for items the user could edit anyway.
+ * - `remote/media` — requires `upload_files`, like the media library itself,
+ *   and `edit_post` on the specific attachment before replacing its bytes.
+ * - `remote/receive` — same coarse gate; the `Importer` then checks the
  *   *post-type* capability (`create_posts`) and, for updates, `edit_post`
  *   on the existing copy. A user who can only write pages cannot push posts.
  *
@@ -70,7 +72,7 @@ final class DestinationController {
 			[
 				'methods'             => 'GET',
 				'callback'            => $this->info( ... ),
-				'permission_callback' => static fn (): bool => is_user_logged_in(),
+				'permission_callback' => self::mayWriteContent( ... ),
 			]
 		);
 
@@ -82,7 +84,8 @@ final class DestinationController {
 				'callback'            => $this->lookup( ... ),
 				// Lookup answers "have you seen this UUID?" — useful only to
 				// someone about to push, i.e. someone with editing rights.
-				'permission_callback' => static fn (): bool => is_user_logged_in() && ( current_user_can( 'edit_posts' ) || current_user_can( 'edit_pages' ) || current_user_can( 'upload_files' ) ),
+				// The callback narrows again to the item actually found.
+				'permission_callback' => self::mayWriteContent( ... ),
 				'args'                => [
 					'uuid'      => [
 						'type'     => 'string',
@@ -112,12 +115,46 @@ final class DestinationController {
 			[
 				'methods'             => 'POST',
 				'callback'            => $this->receive( ... ),
-				// Authenticated only here; the Importer applies the
-				// post-type-specific capability checks once it knows what is
-				// being written.
-				'permission_callback' => static fn (): bool => is_user_logged_in(),
+				// Coarse gate only — "may you write content here at all?" The
+				// Importer applies the post-type-specific capability checks
+				// once it knows what is actually being written.
+				'permission_callback' => self::mayWriteContent( ... ),
 			]
 		);
+	}
+
+	/**
+	 * Whether the authenticated user may write content here at all.
+	 *
+	 * "Logged in" is too weak a gate for these routes: a subscriber has an
+	 * account and can hold an application password, but has no business
+	 * importing anything or reading back what exists. The three core
+	 * capabilities cover the usual roles; the loop after them covers sites
+	 * whose custom post types use their own capability sets, where a user may
+	 * legitimately create a CPT without holding `edit_posts`.
+	 *
+	 * This is the coarse gate. Both callbacks that use it narrow again — by
+	 * post type and by individual item — once they know what is being asked
+	 * for.
+	 *
+	 * @return bool True when the user can create content of some kind.
+	 */
+	public static function mayWriteContent(): bool {
+		if ( ! is_user_logged_in() ) {
+			return false;
+		}
+
+		if ( current_user_can( 'edit_posts' ) || current_user_can( 'edit_pages' ) || current_user_can( 'upload_files' ) ) {
+			return true;
+		}
+
+		foreach ( get_post_types( [ 'show_ui' => true ], 'objects' ) as $pto ) {
+			if ( isset( $pto->cap->create_posts ) && current_user_can( $pto->cap->create_posts ) ) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	/**
@@ -202,6 +239,18 @@ final class DestinationController {
 
 		if ( null === $post ) {
 			return new WP_REST_Response( [ 'found' => false ], 200 );
+		}
+
+		// A hash and a modification time are small, but they are still facts
+		// about a specific item — enough to watch a private draft change
+		// without being able to read it. Only someone who could edit the item
+		// (and so could push over it) gets to see them.
+		if ( ! current_user_can( 'edit_post', $found ) ) {
+			return new WP_Error(
+				'contentcopy_forbidden',
+				__( 'Your destination user cannot access the existing copy of this item.', 'contentcopy' ),
+				[ 'status' => 403 ]
+			);
 		}
 
 		return new WP_REST_Response(

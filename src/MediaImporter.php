@@ -115,11 +115,21 @@ final class MediaImporter {
 			);
 		}
 
+		// The extension said one thing; make the bytes agree before anything
+		// is written. `wp_check_filetype_and_ext()` is what `wp_handle_upload()`
+		// uses, so a file arriving over REST is held to exactly the standard
+		// a file arriving through the media library would be.
+		$verified = self::verifyBytes( $bytes, $filename, (string) $type['type'] );
+
+		if ( $verified instanceof WP_Error ) {
+			return $verified;
+		}
+
 		// UUID match first: this exact file was pushed before.
 		$existing = Uuid::findLocal( $uuid, 'attachment' );
 
 		if ( $existing > 0 ) {
-			return $this->reuse( $existing, $bytes, $actual, $envelope, $filename );
+			return $this->reuse( $existing, $bytes, $actual, $envelope, $filename, $verified );
 		}
 
 		// Hash match second: the bytes already live here under a different
@@ -128,6 +138,19 @@ final class MediaImporter {
 		$byHash = $this->findByHash( $actual );
 
 		if ( $byHash > 0 ) {
+			// The bytes are identical, so the file can be reused either way —
+			// but stamping it with a UUID and overwriting its title is an edit
+			// of someone else's attachment. Without the rights for that, point
+			// at it and leave it exactly as it is.
+			if ( ! current_user_can( 'edit_post', $byHash ) ) {
+				$this->logger->warning(
+					'Reused existing attachment {id} for {file} (hash match) without updating it: your destination user cannot edit it.',
+					[ 'id' => $byHash, 'file' => $filename ]
+				);
+
+				return $this->describe( $byHash );
+			}
+
 			if ( '' === Uuid::get( $byHash ) ) {
 				update_post_meta( $byHash, Uuid::META, $uuid );
 			}
@@ -142,7 +165,7 @@ final class MediaImporter {
 			return $this->describe( $byHash );
 		}
 
-		return $this->create( $bytes, $filename, $type['type'], $uuid, $actual, $envelope );
+		return $this->create( $bytes, $filename, $verified, $uuid, $actual, $envelope );
 	}
 
 	/**
@@ -158,10 +181,23 @@ final class MediaImporter {
 	 * @param string               $hash         SHA-256 of the fresh bytes.
 	 * @param array<string, mixed> $envelope     File metadata from the source.
 	 * @param string               $filename     Sanitised filename, for logging.
+	 * @param string               $mime         MIME type verified against the actual bytes.
 	 *
 	 * @return MediaDescriptor|WP_Error Descriptor for the (possibly updated) attachment.
 	 */
-	private function reuse( int $attachmentId, string $bytes, string $hash, array $envelope, string $filename ): MediaDescriptor|WP_Error {
+	private function reuse( int $attachmentId, string $bytes, string $hash, array $envelope, string $filename, string $mime ): MediaDescriptor|WP_Error {
+		// Replacing bytes under an existing attachment is an edit of that
+		// attachment, so it answers to the same capability the media library
+		// would ask for — `upload_files` on the route only says this user may
+		// add files, not that they may rewrite this one.
+		if ( ! current_user_can( 'edit_post', $attachmentId ) ) {
+			return new WP_Error(
+				'contentcopy_forbidden',
+				__( 'Your destination user cannot modify the existing copy of this file.', 'contentcopy' ),
+				[ 'status' => 403 ]
+			);
+		}
+
 		$stored = (string) get_post_meta( $attachmentId, self::META_HASH, true );
 
 		if ( '' !== $stored && hash_equals( $stored, $hash ) ) {
@@ -179,6 +215,28 @@ final class MediaImporter {
 
 		if ( false === $current ) {
 			return new WP_Error( 'contentcopy_missing_file', __( 'The existing attachment has no file and cannot be updated.', 'contentcopy' ), [ 'status' => 500 ] );
+		}
+
+		// The replacement inherits the existing file's name, path and URL, so
+		// the incoming bytes have to be the same kind of thing the old ones
+		// were. Without this, anything the destination accepts as an upload
+		// could be written underneath an image's URL — already linked from
+		// every post that references it, and still served as an image.
+		$currentType = wp_check_filetype( wp_basename( $current ) );
+		$currentMime = is_string( $currentType['type'] ?? null ) ? $currentType['type'] : '';
+
+		if ( '' === $currentMime || $currentMime !== $mime ) {
+			return new WP_Error(
+				'contentcopy_type_mismatch',
+				sprintf(
+					/* translators: 1: incoming filename, 2: incoming MIME type, 3: existing MIME type. */
+					__( '%1$s is a %2$s file, but the destination copy it would replace is a %3$s file. Delete the destination copy and push again to store it as a new file.', 'contentcopy' ),
+					$filename,
+					$mime,
+					'' === $currentMime ? __( 'unknown', 'contentcopy' ) : $currentMime
+				),
+				[ 'status' => 400 ]
+			);
 		}
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- intentional in-place replacement of a file we own.
@@ -267,6 +325,64 @@ final class MediaImporter {
 		);
 
 		return $this->describe( $attachmentId );
+	}
+
+	/**
+	 * Confirm the bytes really are what the filename claims they are.
+	 *
+	 * `wp_check_filetype()` only reads the extension — rename a script
+	 * `photo.jpg` and it is happy. This runs the same content check
+	 * `wp_handle_upload()` applies to a browser upload, so a file arriving
+	 * over REST is held to the standard a file arriving through the media
+	 * library would be, before anything is written to disk.
+	 *
+	 * A `proper_filename` in the result is WordPress saying "these bytes are
+	 * not that extension, call it this instead"; here that is a refusal
+	 * rather than a rename, because the source and destination must agree on
+	 * the filename for the next push to match it.
+	 *
+	 * @param string $bytes    Raw file contents.
+	 * @param string $filename Sanitised filename.
+	 * @param string $declared MIME type the extension implied.
+	 *
+	 * @return string|WP_Error The verified MIME type, or why the file was refused.
+	 */
+	private static function verifyBytes( string $bytes, string $filename, string $declared ): string|WP_Error {
+		require_once ABSPATH . 'wp-admin/includes/file.php';
+
+		$tmp = wp_tempnam( $filename );
+
+		if ( '' === $tmp ) {
+			return new WP_Error( 'contentcopy_write_failed', __( 'The destination could not create a temporary file to check the upload.', 'contentcopy' ), [ 'status' => 500 ] );
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- temporary file this method owns and deletes below.
+		if ( false === file_put_contents( $tmp, $bytes, LOCK_EX ) ) {
+			wp_delete_file( $tmp );
+
+			return new WP_Error( 'contentcopy_write_failed', __( 'The destination could not write a temporary file to check the upload.', 'contentcopy' ), [ 'status' => 500 ] );
+		}
+
+		$checked = wp_check_filetype_and_ext( $tmp, $filename );
+
+		wp_delete_file( $tmp );
+
+		$verified = is_string( $checked['type'] ?? null ) ? (string) $checked['type'] : '';
+		$proper   = is_string( $checked['proper_filename'] ?? null ) ? (string) $checked['proper_filename'] : '';
+
+		if ( '' === $verified || '' !== $proper || $verified !== $declared ) {
+			return new WP_Error(
+				'contentcopy_bad_filetype',
+				sprintf(
+					/* translators: %s: filename. */
+					__( 'The contents of %s do not match its file extension, so the destination refused it.', 'contentcopy' ),
+					$filename
+				),
+				[ 'status' => 400 ]
+			);
+		}
+
+		return $verified;
 	}
 
 	/**
