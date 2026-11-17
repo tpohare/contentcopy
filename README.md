@@ -1,5 +1,24 @@
 # Content Copy
 
+> ## ⚠️ Pre-alpha — do not use this
+>
+> **This plugin is pre-alpha software. It is not finished, not tested on real
+> sites, and must not be installed on anything you care about — least of all a
+> production site.**
+>
+> It writes posts, media and custom fields into a second WordPress install
+> using credentials you give it. When it gets that wrong it can overwrite
+> content, duplicate media, or leave a half-imported post behind. There is no
+> undo, no migration path between versions, and no upgrade route from whatever
+> this version does today to whatever it does next.
+>
+> Treat everything below as a description of *intent*, not of behaviour you can
+> rely on. Expect breaking changes without notice, expect data loss, and only
+> point it at throwaway sites with backups you are happy to restore from.
+>
+> If you need to move content between WordPress sites today, use an
+> established, maintained tool instead.
+
 Push a post, page or custom post type — with its media, terms and custom
 fields — from one WordPress site to another, from the post edit screen.
 
@@ -19,6 +38,9 @@ instead of silently overwriting.
   else.
 
 ## Install
+
+Only on sites you are willing to break — see the warning at the top of this
+file.
 
 On **both** sites:
 
